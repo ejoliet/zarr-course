@@ -1,0 +1,2 @@
+# Pair every notebook with a git-diffable percent-format .py
+formats = "ipynb,py:percent"

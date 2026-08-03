@@ -1,0 +1,30 @@
+[project]
+name = "zarr-course"
+version = "0.1.0"
+description = "Hands-on Zarr v3 course: data lakes, distributed compute, astronomy workloads"
+requires-python = ">=3.11"
+dependencies = [
+    "zarr>=3",
+    "xarray",
+    "dask[distributed]",
+    "s3fs",
+    "numcodecs",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "h5py",
+    "hdf5plugin",
+    "netcdf4",
+    "h5netcdf",
+    "virtualizarr",
+    "icechunk",
+    "astropy",
+    "matplotlib",
+    "psutil",
+    "python-dotenv",
+    "jupyterlab",
+    "jupytext",
+]
+
+[project.optional-dependencies]
+extras = ["datasets", "pyiceberg[sql-sqlite,s3fs]"]

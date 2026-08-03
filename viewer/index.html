@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!-- Module 13: no-build-step browser reader for a Zarr v3 store over HTTP ranges.
+     Serve a store anonymously (mc anonymous set download local/zarr-lab) or use
+     any public Zarr URL, then open this file. Vanilla JS, zarrita from CDN. -->
+<html>
+<head><meta charset="utf-8"><title>zarr viewer</title>
+<style>body{font-family:monospace;margin:2rem}canvas{border:1px solid #888;image-rendering:pixelated}</style>
+</head>
+<body>
+<h3>Zarr chunk viewer (zarrita.js)</h3>
+<input id="url" size="80" value="http://127.0.0.1:9000/zarr-lab/labeled.zarr">
+<input id="path" size="20" value="flux" title="array path in group">
+<button id="go">load [0, :, :]</button>
+<p id="status"></p>
+<canvas id="cv" width="512" height="512"></canvas>
+<script type="module">
+import * as zarr from "https://cdn.jsdelivr.net/npm/zarrita/+esm";
+document.getElementById("go").onclick = async () => {
+  const status = document.getElementById("status");
+  try {
+    status.textContent = "opening...";
+    const store = new zarr.FetchStore(document.getElementById("url").value);
+    const arr = await zarr.open(store, {path: document.getElementById("path").value, kind: "array"});
+    const view = await zarr.get(arr, [0, zarr.slice(0, 512), zarr.slice(0, 512)]);
+    const d = view.data;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of d) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    const ctx = document.getElementById("cv").getContext("2d");
+    const im = ctx.createImageData(512, 512);
+    for (let i = 0; i < d.length; i++) {
+      const g = Math.round(255 * (d[i] - lo) / (hi - lo || 1));
+      im.data.set([g, g, g, 255], i * 4);
+    }
+    ctx.putImageData(im, 0, 0);
+    status.textContent = `ok -- shape ${arr.shape}, plane [0] range [${lo.toFixed(2)}, ${hi.toFixed(2)}]`;
+  } catch (e) { status.textContent = "error: " + e; }
+};
+</script>
+</body>
+</html>
