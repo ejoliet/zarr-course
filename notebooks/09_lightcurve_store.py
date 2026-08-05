@@ -16,20 +16,27 @@
 # ## Run the benchmark (script, not cells — kernel state pollutes timing)
 
 # %%
-!cd ../scripts && uv run python lc_bench.py
+!cd ../scripts && uv run --extra extras python lc_bench.py
 
 # %% [markdown]
-# Expected shape of results (measured during course development, local NVMe):
+# Five lanes: Zarr, three Parquet layouts (1M-row groups; 50k object-grain groups;
+# 1M + page index), and real Iceberg via pyiceberg. Measured local NVMe, warm cache:
 #
-# | Workload | Zarr | Parquet | Ratio |
-# |---|---|---|---|
-# | write | 4.6 s | 11.9 s | 2.6x |
-# | 50 random light curves | 0.84 s | 1.44 s | 1.7x |
-# | one epoch, all objects | 0.078 s | 1.27 s | **16x** |
-# | per-object std full scan | 3.5 s | 7.5 s | 2.2x |
+# | Workload | Zarr | pq1M | pq50k | pq1Mpi | Iceberg |
+# |---|---|---|---|---|---|
+# | write | **4.4 s** | 9.2 s | 23.7 s | 10.1 s | 19.4 s |
+# | 50 random light curves | 2.03 s | **0.91 s** | 1.87 s | 1.17 s | 3.06 s |
+# | one epoch, all objects | **0.083 s** | 0.223 s | 0.352 s | 0.235 s | 0.687 s |
+# | per-object std full scan | 0.551 s | **0.515 s** | 0.609 s | 0.566 s | 0.574 s |
+# | size (400 MB raw) | **250 MB** | 326 MB | 437 MB | 326 MB | 437 MB |
 #
 # W3 is the tell: object-sorted Parquet scans every row group for an epoch predicate;
 # fixing it needs a *second copy* sorted by epoch. Zarr serves both axes from one layout.
+# Everything else here is warm-cache-flattered — Parquet wins W2 locally because there is
+# no request latency. Rerun on MinIO (README exercise 1) before trusting any ratio but W3.
+# Row groups: 50k (25 objects) fetches 15x fewer bytes per curve, yet lost on every axis
+# locally (+34% storage, 2.6x write, 2x slower W2) — it is a bet on bytes-over-the-wire,
+# which only pays off on object storage. The page index is a wash locally too.
 
 # %% [markdown]
 # ## Real data: Multimodal Universe (streaming preview, no bulk download)

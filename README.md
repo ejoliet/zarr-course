@@ -437,28 +437,45 @@ The bridge is one Iceberg table mapping `object_id → row_index`. In the long-t
 Script: `lc_bench.py` (shipped with this course). Subset 20,000 objects × 2,000 epochs, three quantities, same bits into both layouts:
 
 - **Zarr**: sharded arrays, `shards=(5000, T)`, inner `chunks=(500, 500)`, zstd
-- **Parquet**: long table sorted by `object_id`, 1M-row groups, zstd — the read-optimized physical layout Iceberg compaction produces (Iceberg's read path *is* Parquet; it adds catalog/ACID, not speed)
+- **Parquet**, three layouts of the same object-sorted long table, zstd — the read-optimized physical layout Iceberg compaction produces (Iceberg's read path *is* Parquet; it adds catalog/ACID, not speed): `pq1M` = 1M-row groups, `pq50k` = 50k-row groups (object-grain: one object is T=2,000 rows, so 25 objects per group), `pq1Mpi` = 1M-row groups **plus the Parquet page index** (`write_page_index=True`)
+- **Iceberg**, for real, via `pyiceberg` + a local SQLite catalog — same bits, written through a catalog
 
 ```bash
-uv run python lc_bench.py
+uv run --extra extras python lc_bench.py   # drop --extra extras to skip the Iceberg lane
 ```
 
-Measured (local NVMe, this machine — rerun on yours):
+Measured (local NVMe, warm page cache, median of 3 reads, this machine — rerun on yours):
 
-| Workload | Zarr | Parquet | Ratio |
-|---|---|---|---|
-| W1 write full dataset | 4.6 s | 11.9 s | 2.6× |
-| W2 50 random full light curves | 0.84 s | 1.44 s | 1.7× |
-| W3 one epoch across all objects | **0.078 s** | **1.27 s** | **16×** |
-| W4 per-object std (full scan) | 3.5 s | 7.5 s | 2.2× |
-| Storage (400 MB raw) | 250 MB | 326 MB | 1.3× |
+| Workload | Zarr | pq1M | pq50k | pq1Mpi | Iceberg | Zarr vs best table |
+|---|---|---|---|---|---|---|
+| W1 write full dataset | **4.4 s** | 9.2 s | 23.7 s | 10.1 s | 19.4 s | 2.1× |
+| W2 50 random full light curves | 2.03 s | **0.91 s** | 1.87 s | 1.17 s | 3.06 s | 0.45× (Parquet wins) |
+| W3 one epoch across all objects | **0.083 s** | 0.223 s | 0.352 s | 0.235 s | 0.687 s | **2.7×** |
+| W4 per-object std (full scan) | 0.551 s | **0.515 s** | 0.609 s | 0.566 s | 0.574 s | ~1× |
+| Storage (400 MB raw) | **250 MB** | 326 MB | 437 MB | 326 MB | 437 MB | 1.3× |
+
+> ⚠️ These replaced an earlier single-shot run that showed Zarr winning W2 (0.84 s vs 1.44 s) and a 16× W3 gap. Single runs on a busy laptop vary ~2×, which is why the script now takes a median of 3 — and warm-cache local NVMe is the *worst* case for the Zarr argument: no request latency, so Parquet's point lookups look great and only W3's structural penalty survives. Nothing but W3, W1 and storage is a robust local signal; the ratios that transfer to 200M objects are the ones measured on object storage (exercise 1).
 
 ### Why the numbers look like this
 
-1. **W3 is the tell.** Parquet is sorted by object; an epoch predicate matches rows in *every* row group → full-column scan. Zarr computes chunk coordinates from the index and reads exactly one chunk-column. To fix W3 in Parquet you need a *second copy* sorted by epoch. **Zarr serves both axes from one layout; Parquet must pick one.**
-2. **W2 is closer than you'd expect** — sorted Parquet + row-group stats is genuinely good at point lookups. On S3 the gap widens in Zarr's favor: Parquet needs footer + page-index + page reads per file touched; Zarr needs one computed-key range GET per chunk, no metadata round-trips.
-3. **Keys are free.** The 76 MB Parquet spends on encoded `object_id`/`epoch` columns, Zarr spends on nothing.
-4. **W1**: Zarr writes are embarrassingly parallel per shard — on Dask/EKS the gap grows with worker count.
+1. **W3 is the tell, and it is the only structural read gap.** Parquet is sorted by object; an epoch predicate matches rows in *every* row group → full-column scan. Zarr computes chunk coordinates from the index and reads exactly one chunk-column. To fix W3 in Parquet you need a *second copy* sorted by epoch. **Zarr serves both axes from one layout; Parquet must pick one.**
+2. **Row-group granularity: measure it, don't reason about it.** A 1M-row group holds 500 objects, so one light curve decompresses ~8 MB of `flux`+`ferr` to return 16 KB. Object-grain 50k-row groups (25 objects, 0.53 MB/group) cut that 15× — and lost on *every* axis here: W2 1.87 s vs 0.91 s, +34% storage (437 vs 326 MB — zstd gets a 20× smaller compression context and dictionaries reset per group), 2.6× write time. Warm page cache makes bytes-read nearly free, so all that is left is per-scan planning over 800 row groups instead of 40. Writing the Parquet page index (`pq1Mpi`) is a wash locally too: same size, +10% write, no read win. **Small row groups are a bet on bytes-over-the-wire being the bottleneck** (cold S3, high latency) — real for a 200M-object store on object storage, invisible on a laptop. Find your crossover with exercise 1 before committing a layout.
+3. **W2 is where sorted Parquet genuinely wins here** — row-group stats are very good at point lookups, and Zarr pays for reading `500×500` chunks to serve one row of 2,000. On S3 the balance shifts: Parquet needs footer + page-index + data-page round-trips per file touched; Zarr needs one computed-key range GET per chunk, no metadata reads. Chunk the object axis finer (`chunks=(50, 2_000)`) if single-curve serving is the primary workload.
+4. **Keys are free.** The 76 MB Parquet spends on encoded `object_id`/`epoch` columns, Zarr spends on nothing.
+5. **W1 is Zarr's clearest win** (2.1× the fastest table lane, 5.4× the 50k one) and it is the one that scales: Zarr writes are embarrassingly parallel per shard, so on Dask/EKS the gap grows with worker count. Iceberg's write cost — catalog transaction + manifest/metadata on top of the same Parquet — is real but bounded.
+
+### What using real Iceberg changes (and what it doesn't)
+
+The `ice` lane is not a relabelled Parquet run — going through a catalog moves three things:
+
+| Hand-written Parquet | Through `pyiceberg` 0.11 |
+|---|---|
+| `row_group_size=50_000` (rows) | table property `write.parquet.row-group-limit` (rows, default 1,048,576). `write.parquet.row-group-size-bytes` is **accepted and ignored** — it warns `not implemented`, so byte-based tuning silently does nothing |
+| `sorting_columns=[SortingColumn(0)]` | `SortOrder` is metadata only. PyIceberg does not sort on write and has no `rewrite_data_files`/compaction — sort the Arrow table yourself or W2 collapses |
+| `dqa` as `uint16` | Iceberg has no unsigned types → widen to `int32` (that column doubles) |
+| `pads.dataset(...).to_table(filter=...)` | `table.scan(row_filter=EqualTo(...)).to_arrow()`, which re-plans manifests per scan — 1.6× the pq50k point-read time it is layout-identical to (3.06 s vs 1.87 s), 3.4× pq1M |
+
+None of it changes the *layout* argument: Iceberg's read path is these same Parquet files, so the hand-tuned Parquet lane remains the honest best case for Iceberg, and the `ice` lane shows the overhead a catalog adds on top.
 
 ### Scaling to 200M × 40k
 
@@ -488,30 +505,29 @@ Queries: recent epochs → hot table;  bulk science / ML / curve serving → mat
 
 This is Iceberg-as-WAL, Zarr-as-columnar-serving — the exact hot/cold split Iceberg itself uses internally, one level up. Icechunk gives the matrix side commits and time travel, so a reprocessing campaign is a branch, not a copy.
 
-### Iceberg-on-MinIO subset (to run the comparison against real Iceberg)
+### Iceberg-on-MinIO subset (moving the real Iceberg lane onto object storage)
+
+`lc_bench.py` already runs the Iceberg lane against a local SQLite catalog and a `file://` warehouse. Point the same catalog at MinIO to add request latency, which is the variable that actually decides this comparison:
 
 ```bash
-uv add "pyiceberg[sql-sqlite,s3fs]"
+uv add "pyiceberg[sql-sqlite,s3fs]"    # already in the `extras` group
 ```
 
 ```python
-from pyiceberg.catalog import load_catalog
-catalog = load_catalog("lab", **{
-    "type": "sql",
+from pyiceberg.catalog.sql import SqlCatalog
+cat = SqlCatalog("lab", **{
     "uri": "sqlite:///iceberg_catalog.db",
     "warehouse": "s3://zarr-lab/warehouse",
     "s3.endpoint": "http://127.0.0.1:9000",
     "s3.access-key-id": "minioadmin",
     "s3.secret-access-key": "minioadmin",
 })
-catalog.create_namespace_if_not_exists("lc")
-# create table from the lc_bench.py long-table schema, append pa.Table, then
-# rerun W2–W4 via table.scan(row_filter=...) and compare against Zarr-on-MinIO
+# reuse ICE_SCHEMA / ice_write() from lc_bench.py verbatim; only the warehouse moves
 ```
 
 **Exercises**:
 
-1. Rerun `lc_bench.py` with both stores pointed at MinIO. Expect every gap to widen except W2 (request latency dominates; Zarr's zero-metadata reads shine).
+1. Rerun `lc_bench.py` with all stores pointed at MinIO. Hypothesis to test, not assume: W2/W3/W4 gaps move in Zarr's favor once bytes and round-trips cost something (Zarr needs no metadata reads), and the 50k-row-group layout finally beats 1M because it fetches 15× less per curve. The warm-local numbers above say the opposite — find where the crossover is.
 2. Grow the subset 10× (200k × 4k) and plot W2–W4 vs size. The ratios are what transfer to 200M — absolute times are just your disk.
 3. Simulate the hybrid: land 100 epochs in the Iceberg table, then write a compaction task that flushes them as a chunk-aligned region write into the Zarr store.
 
@@ -586,7 +602,7 @@ Measured in the same run: reducing the full 1 GB on-disk array through Dask show
 
 | Benefit | Evidence |
 |---|---|
-| vs Parquet/Iceberg (tables) | Module 9 benchmark, 16× epoch slice |
+| vs Parquet/Iceberg (tables) | Module 9 benchmark, epoch slice (3× warm-local, structural: Parquet must full-scan) |
 | vs HDF5 (arrays) | this module: codec portability, lock-free parallel reads, cloud access |
 | vs FITS | Module 1 ex.1, this module, Module 7 virtualization spike |
 | Memory / out-of-core | this module RSS demo, Module 3 lazy open |

@@ -1,2 +1,5 @@
 .env
 *.zarr/
+*.parquet
+ice_warehouse/
+iceberg_catalog.db
