@@ -1,121 +1,10 @@
-# zarr-course
-
-Hands-on Zarr v3 course: data lakes, distributed compute, and astronomy-scale workloads.
-Local-first (macOS, `uv`, MinIO S3 emulation), benchmarked claims, Roman-SSC-flavored examples.
-
-## Setup (macOS, bash) — step by step
-
-Every step has a verify command. Don't continue past a failing verify.
-
-**0. Prerequisites** (skip any you have):
-
-```bash
-# Homebrew (macOS package manager)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew --version                    # verify
-
-# git and uv (Python project manager — replaces pip/venv/conda for this course)
-brew install git uv
-git --version && uv --version     # verify
-```
-
-**1. Get the course and its environment**:
-
-```bash
-git clone https://github.com/ejoliet/zarr-course
-cd zarr-course
-uv sync                           # creates .venv with all pinned dependencies
-uv run python -c "import zarr; print(zarr.__version__)"   # verify: must print 3.x
-```
-
-**2. Local credentials** (fake MinIO creds only — real AWS creds never go here):
-
-```bash
-cp .env.example .env              # .env is gitignored; verify: git status shows nothing
-```
-
-**3. MinIO — your laptop's private S3** (needed from notebook 04 on; 00–03 work without it):
-
-```bash
-brew install minio/stable/minio minio/stable/mc
-mkdir -p ~/minio-data
-minio server ~/minio-data --console-address ":9001" &
-mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
-mc mb -p local/zarr-lab
-mc ls local                       # verify: shows zarr-lab/
-```
-
-Browse it anytime at http://127.0.0.1:9001 (login: minioadmin/minioadmin).
-
-**4. Launch**:
-
-```bash
-uv run jupyter lab notebooks/     # open 00_setup.ipynb, Run All — all checks must pass
-```
-
-### Troubleshooting
-
-| Symptom | Cause → fix |
-|---|---|
-| `zarr` version prints 2.x | stale env → `uv sync --reinstall`; never `pip install` into this project |
-| `Address already in use :9000` | old MinIO running → `pkill -f "minio server"` and rerun step 3 |
-| S3 cells print "MinIO: DOWN" | MinIO not started or `.env` missing → redo steps 2–3, restart kernel |
-| `NoSuchBucket zarr-lab` | bucket not created → `mc mb -p local/zarr-lab` |
-| Kernel dies on a big array | close other notebooks (each holds its arrays); Restart & Run All |
-| Notebook works, rerun fails oddly | out-of-order cell state → **Restart & Run All** (the done-criterion) |
-| `ModuleNotFoundError` in Jupyter | wrong kernel → launch via `uv run jupyter lab`, not a global Jupyter |
-
-## Recommended paths
-
-| Track | Who | Notebooks | Time |
-|---|---|---|---|
-| Fast track | everyone, first contact | 00 → 01 → 03 | ~90 min |
-| Astronomer | FITS/ASDF background | fast track + 02 (MEF mapping) → 11 (WCS) → 09 (light curves) → 07 | ~5 h |
-| Engineer | pipelines, data lakes | fast track + 04 → 05 → 06 → 12 (write safety) → 07 → 09/10 | ~7 h |
-
-Read each notebook's README module alongside it — notebooks run the evidence, the README carries the argument. Finish any track with the Decision guide below.
-
-## Layout
-
-```
-notebooks/    13 modules as .ipynb, paired with git-diffable .py (jupytext percent)
-scripts/      benchmarks + crash demo — scripts, not cells: kernel state pollutes timing
-viewer/       module 13: no-build-step zarrita.js browser reader (open index.html)
-data/         generated stores (gitignored)
-```
-
-## Notebook index
-
-| # | Notebook | Module | Needs |
-|---|---|---|---|
-| 00 | `00_setup` | environment check, hygiene rules | — |
-| 01 | `01_basics` | arrays, chunks, store-as-files | — |
-| 02 | `02_groups_codecs` | hierarchy = your MEF, codec shoot-out | — |
-| 03 | `03_xarray` | labeled cubes, lazy open, append | — |
-| 04 | `04_s3_minio` | object-store backend, consolidated metadata | MinIO |
-| 05 | `05_dask` | parallel write/read, region writes | MinIO (falls back local) |
-| 06 | `06_sharding` | tiny-objects problem | — |
-| 07 | `07_icechunk_virtualizarr` | transactions, time travel, virtualization | — |
-| 08 | `08_live_s3` | optional live AWS + ops checklist | AWS |
-| 09 | `09_lightcurve_store` | 200M-object case study vs Iceberg | runs `scripts/lc_bench.py` |
-| 10 | `10_format_headtohead` | vs HDF5/FITS, out-of-core memory | runs `scripts/fmt_bench.py` |
-| 11 | `11_wcs` | sky-coordinate cutouts, GWCS pattern | — |
-| 12 | `12_write_safety` | Airflow retry corruption + Icechunk fix | runs `scripts/crash_task.py` |
-| 13 | `viewer/index.html` | serving & browser visualization | MinIO (anonymous) |
-
-Done-criterion per notebook: **Restart & Run All passes.**
-
-The rest of this README is the course spine — the full narrative, measured benchmark
-tables, scaling math, decision guides, and verdicts that the notebooks reference.
-
----
-
+# Zarr Hands-On Course
 
 > Step-by-step, local-first course on Zarr v3 for data lakes and distributed compute.
 > Target: macOS, `uv`, zarr-python 3.x. Local disk → MinIO (S3 emulation) → optional live S3.
 
 **Audience**: data engineer already fluent in Parquet, FITS/ASDF, S3, Dask, Airflow.
-**Time**: ~10–14 hours across 13 modules + browser viewer. Each module is self-contained and verifiable.
+**Time**: ~6–8 hours across 8 modules. Each module is self-contained and verifiable.
 
 ---
 
@@ -795,32 +684,6 @@ DS9, Firefly, and jdaviz do not read Zarr natively today. Working paths:
 Known limits to keep in mind: no built-in schema validation (vs ASDF), many-object sprawl without sharding, Zarr v2↔v3 ecosystem still settling — pin `zarr>=3` in every project.
 
 ---
-
-## Glossary (junior-friendly)
-
-- **Store** — where the bytes live: a directory, an S3 prefix, a zip. Zarr doesn't care.
-- **Chunk** — the unit of I/O: one compressed block of the array, one file/object, one read. Nothing smaller than a chunk is ever read from disk.
-- **Shard** — one storage object packing many chunks (readable individually via byte ranges). Fixes "millions of tiny files."
-- **Codec** — the compression/transform pipeline per chunk (e.g. blosc-zstd + shuffle). Declared in metadata, so readers need no plugins.
-- **Consolidated metadata** — all the store's JSON gathered into one object: one GET to open, instead of one per array.
-- **Region write** — writing a slice of a pre-allocated array (`region=`). Chunk-aligned region = no read-modify-write, safe to parallelize.
-- **Lazy open** — `open_zarr` reads only metadata; data moves when you `.compute()` or slice.
-- **Attrs** — JSON key-values on any array/group. Your FITS header keywords live here.
-- **Icechunk session/commit** — a transaction: writes are invisible to readers until commit, which is atomic.
-- **Virtualization (kerchunk/VirtualiZarr)** — a map of byte ranges inside existing HDF5/NetCDF files, letting Zarr readers read them in place, no conversion.
-
-## Best-practices card (pin this)
-
-1. **Chunk = access pattern.** Decide how data is read *before* choosing chunks; target 1–100 MB compressed, ≥ a few MB on S3.
-2. **Restart & Run All must pass** — out-of-order notebook state is the #1 source of fake bugs.
-3. **Never commit data or secrets.** `data/`, `*.zarr/`, `.env` are gitignored; keep it that way.
-4. **Pin `zarr>=3`** in every project; don't mix v2/v3 readers on one store.
-5. **One writer per chunk.** Parallelize by chunk-aligned regions; concurrent writes to the same chunk is corruption (notebook 12).
-6. **On S3: consolidate metadata, shard small chunks, co-locate compute and bucket, add the `crc32c` codec.**
-7. **Attrs are not a schema.** Zarr validates nothing — if contracts matter, enforce them in code (or keep ASDF for delivery products).
-8. **Benchmark as scripts, not cells** — kernel state pollutes timings.
-9. **Prefer plain Zarr + consolidated metadata for public serving**; Icechunk where you need transactions/time travel (readers then need the library).
-10. **Astronomers: the WCS travels with the data** (attrs or ASDF sidecar, notebook 11) — a store without it is a cube nobody can point at the sky.
 
 ## References
 
